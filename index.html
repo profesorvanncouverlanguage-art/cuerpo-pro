@@ -63,6 +63,7 @@
       text-rendering: optimizeLegibility;
     }
     img { max-width: 100%; display: block; }
+    [hidden], .is-hidden { display: none !important; }
     button, a { font-family: inherit; }
     button { cursor: pointer; border: 0; background: none; color: inherit; }
     :focus-visible { outline: 2px solid #FF6B4A; outline-offset: 3px; }
@@ -311,6 +312,15 @@
       box-shadow: 0 0 12px rgba(255, 90, 80, .6);
     }
     .progress-label { font-size: 13px; color: var(--muted); margin-bottom: 16px; }
+    .weekend-note {
+      margin: 0 0 16px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid var(--hair);
+      background: var(--lime-dim);
+      color: var(--text);
+      font-size: 13px;
+    }
 
     .train-grid { display: grid; gap: 16px; }
     .ex-card {
@@ -562,6 +572,7 @@
         </div>
         <div class="progress" aria-hidden="true"><i id="progress-fill"></i></div>
         <p class="progress-label" id="progress-label">0 de 0 ejercicios</p>
+        <p class="weekend-note" id="weekend-note" hidden></p>
       </div>
 
       <div class="train-grid" id="workout-panel">
@@ -812,6 +823,7 @@
       dietSchedule: $("diet-schedule"),
       dietNote: $("diet-note"),
       weekGrid: $("week-grid"),
+      weekendNote: $("weekend-note"),
       toast: $("toast")
     };
 
@@ -831,6 +843,16 @@
       const map = { Mon: "lun", Tue: "mar", Wed: "mie", Thu: "jue", Fri: "vie", Sat: "sab", Sun: "dom" };
       return map[bogotaParts(new Date()).weekday] || "lun";
     }
+    function isWeekendKey(k) { return k === "sab" || k === "dom"; }
+    function defaultTrainingDay() {
+      const k = todayKey();
+      return isWeekendKey(k) ? "lun" : k;
+    }
+    function setHidden(el, hide) {
+      if (!el) return;
+      el.hidden = !!hide;
+      el.classList.toggle("is-hidden", !!hide);
+    }
     function dayByKey(k) { return DAYS.find((d) => d.key === k); }
     function exercises(day) { return ROUTINES[day] || []; }
 
@@ -844,7 +866,10 @@
       let raw;
       try { raw = JSON.parse(localStorage.getItem(STORAGE) || "null"); } catch (e) { raw = null; }
       if (!raw || raw.date !== date) {
-        raw = { date, selectedDay: todayKey(), sessionMs: 0, sessionRunning: false, sessionStartedAt: null, days: {} };
+        raw = { date, selectedDay: defaultTrainingDay(), userPickedDay: false, sessionMs: 0, sessionRunning: false, sessionStartedAt: null, days: {} };
+      }
+      if (!raw.userPickedDay && isWeekendKey(todayKey()) && isWeekendKey(raw.selectedDay)) {
+        raw.selectedDay = "lun";
       }
       if (!raw.days[raw.selectedDay]) raw.days[raw.selectedDay] = emptyDayState(raw.selectedDay);
       return raw;
@@ -854,6 +879,7 @@
     }
 
     let state = loadState();
+    try { saveState(); } catch (e) {}
     let timer = null;
     let raf = 0;
     let audioCtx = null;
@@ -892,42 +918,66 @@
     }
 
     function ensureAudio() {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return null;
-      if (!audioCtx) audioCtx = new AC();
-      if (audioCtx.state === "suspended") audioCtx.resume();
-      return audioCtx;
-    }
-    function beep(times) {
-      const ctx = ensureAudio();
-      if (!ctx) return;
-      const n = times || 2;
-      for (let i = 0; i < n; i++) {
-        const t0 = ctx.currentTime + i * 0.22;
-        const osc = ctx.createOscillator();
-        const g = ctx.createGain();
-        osc.type = "sine";
-        osc.frequency.value = i === n - 1 ? 1046 : 830;
-        g.gain.setValueAtTime(0.0001, t0);
-        g.gain.exponentialRampToValueAtTime(0.2, t0 + 0.02);
-        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);
-        osc.connect(g); g.connect(ctx.destination);
-        osc.start(t0); osc.stop(t0 + 0.2);
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        if (!audioCtx) audioCtx = new AC();
+        if (audioCtx.state === "suspended" && audioCtx.resume) {
+          const p = audioCtx.resume();
+          if (p && p.catch) p.catch(function () {});
+        }
+        return audioCtx;
+      } catch (e) {
+        return null;
       }
     }
-    function vibrate(pattern) {
-      try { if (navigator.vibrate) navigator.vibrate(pattern || [200, 80, 200]); } catch (e) {}
-    }
-    async function requestWake() {
+    function beep(times) {
       try {
-        if (navigator.wakeLock && !wakeLock) {
-          wakeLock = await navigator.wakeLock.request("screen");
-          wakeLock.addEventListener("release", () => { wakeLock = null; });
+        const ctx = ensureAudio();
+        if (!ctx) return;
+        const play = function () {
+          try {
+            const n = times || 2;
+            for (let i = 0; i < n; i++) {
+              const t0 = ctx.currentTime + i * 0.22;
+              const osc = ctx.createOscillator();
+              const g = ctx.createGain();
+              osc.type = "sine";
+              osc.frequency.value = i === n - 1 ? 1046 : 830;
+              g.gain.setValueAtTime(0.0001, t0);
+              g.gain.exponentialRampToValueAtTime(0.2, t0 + 0.02);
+              g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);
+              osc.connect(g); g.connect(ctx.destination);
+              osc.start(t0); osc.stop(t0 + 0.2);
+            }
+          } catch (err) {}
+        };
+        if (ctx.state === "suspended" && ctx.resume) {
+          ctx.resume().then(play).catch(function () {});
+        } else {
+          play();
         }
       } catch (e) {}
     }
+    function vibrate(pattern) {
+      try {
+        if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
+          navigator.vibrate(pattern || [200, 80, 200]);
+        }
+      } catch (e) {}
+    }
+    async function requestWake() {
+      try {
+        if (navigator.wakeLock && typeof navigator.wakeLock.request === "function" && !wakeLock) {
+          wakeLock = await navigator.wakeLock.request("screen");
+          if (wakeLock && wakeLock.addEventListener) {
+            wakeLock.addEventListener("release", function () { wakeLock = null; });
+          }
+        }
+      } catch (e) { wakeLock = null; }
+    }
     async function releaseWake() {
-      try { if (wakeLock) { await wakeLock.release(); wakeLock = null; } } catch (e) {}
+      try { if (wakeLock && wakeLock.release) { await wakeLock.release(); wakeLock = null; } } catch (e) { wakeLock = null; }
     }
     function maybeReleaseWake() {
       if (!state.sessionRunning && !timer) releaseWake();
@@ -1148,8 +1198,19 @@
     function renderWorkout() {
       const day = currentDay();
       const isOff = day.type === "walk" || day.type === "rest";
-      els.workoutPanel.hidden = isOff;
-      els.offdayPanel.hidden = !isOff;
+      setHidden(els.workoutPanel, isOff);
+      setHidden(els.offdayPanel, !isOff);
+
+      const today = todayKey();
+      if (els.weekendNote) {
+        if (isWeekendKey(today) && !isOff) {
+          const when = today === "dom" ? "domingo, día de descanso" : "sábado, día de caminata";
+          els.weekendNote.textContent = "Hoy es " + when + ". Aquí tienes el lunes (u otro día que elijas) para usar el cronómetro.";
+          setHidden(els.weekendNote, false);
+        } else {
+          setHidden(els.weekendNote, true);
+        }
+      }
 
       if (isOff) {
         els.progressFill.style.width = "0%";
@@ -1159,8 +1220,8 @@
         if (day.type === "walk") {
           els.offText.textContent = "Sal a caminar 30 a 45 minutos, al aire libre si puedes. Sin prisa: esto también cuenta.";
           const walking = timer && timer.kind === "walk";
-          els.walkBtns.hidden = !!walking;
-          els.walkTimer.hidden = !walking;
+          setHidden(els.walkBtns, !!walking);
+          setHidden(els.walkTimer, !walking);
           if (walking) {
             const left = timerLeft();
             const f = timer.duration ? left / timer.duration : 0;
@@ -1172,8 +1233,8 @@
           }
         } else {
           els.offText.textContent = "El músculo crece mientras descansas. Camina suave si quieres, duerme 7–8 horas y sigue la dieta. Recuerda: una comida libre, no el día entero.";
-          els.walkBtns.hidden = true;
-          els.walkTimer.hidden = true;
+          setHidden(els.walkBtns, true);
+          setHidden(els.walkTimer, true);
         }
         return;
       }
@@ -1195,7 +1256,7 @@
           ? "Completado · " + ex.sets + " × " + ex.reps
           : ("Serie " + setNum + " de " + ex.sets + " · " + ex.reps + " · " + restTxt);
         els.exCue.textContent = ex.cue;
-        els.exCue.hidden = !ex.cue;
+        setHidden(els.exCue, !ex.cue);
       }
 
       let label = "Listo";
@@ -1252,9 +1313,9 @@
       } else if (ex && ds.completed[ds.exIndex]) {
         els.btnPrimary.textContent = "Siguiente ejercicio";
       } else if (ex && ex.mode === "hiit") {
-        els.btnPrimary.textContent = "Empezar HIIT";
+        els.btnPrimary.textContent = "Iniciar HIIT";
       } else if (ex && ex.mode === "work") {
-        els.btnPrimary.textContent = "Empezar serie · 45 s";
+        els.btnPrimary.textContent = "Iniciar plancha · 45 s";
       } else if (ex && (ds.setsDone[ds.exIndex] || 0) + 1 >= ex.sets) {
         els.btnPrimary.textContent = "Última serie hecha";
       } else {
@@ -1323,42 +1384,61 @@
       renderDiet();
     }
 
-    function loop() {
-      renderSession();
-      if (timer) {
-        if (currentDay().type === "walk" || currentDay().type === "rest") {
-          // walk ring lives in offday
+    function tick() {
+      try {
+        renderSession();
+        if (timer) {
           const left = timerLeft();
-          if (timer.kind === "walk") {
-            els.walkTime.textContent = fmtMS(left);
-            const f = timer.duration ? left / timer.duration : 0;
-            els.walkRing.style.strokeDasharray = String(CIRC);
-            els.walkRing.style.strokeDashoffset = String(CIRC * (1 - f));
-            if (left <= 0) onTimerDone();
-          }
-        } else {
-          const left = timerLeft();
-          els.ringTime.textContent = fmtMS(left);
           const f = timer.duration ? left / timer.duration : 0;
-          els.ringValue.style.strokeDasharray = String(CIRC);
-          els.ringValue.style.strokeDashoffset = String(CIRC * (1 - f));
-          if (left <= 3000) els.ringWrap.classList.add("is-pulse");
-          else els.ringWrap.classList.remove("is-pulse");
-          if (timer.kind === "rest") { els.ringLabel.textContent = "Descanso"; els.ringSub.textContent = "Siguiente serie"; }
-          if (timer.kind === "work") { els.ringLabel.textContent = "Plancha"; }
-          if (timer.kind === "hiit-hard") { els.ringLabel.textContent = "Fuerte"; els.ringWrap.classList.add("is-hard"); }
-          if (timer.kind === "hiit-easy") { els.ringLabel.textContent = "Suave"; els.ringWrap.classList.add("is-easy"); }
+          if (timer.kind === "walk") {
+            if (els.walkTime) els.walkTime.textContent = fmtMS(left);
+            if (els.walkRing) {
+              els.walkRing.style.strokeDasharray = String(CIRC);
+              els.walkRing.style.strokeDashoffset = String(CIRC * (1 - f));
+            }
+          } else {
+            if (els.ringTime) els.ringTime.textContent = fmtMS(left);
+            if (els.ringValue) {
+              els.ringValue.style.strokeDasharray = String(CIRC);
+              els.ringValue.style.strokeDashoffset = String(CIRC * (1 - f));
+            }
+            if (els.ringWrap) {
+              if (left <= 3000) els.ringWrap.classList.add("is-pulse");
+              else els.ringWrap.classList.remove("is-pulse");
+              els.ringWrap.classList.remove("is-work", "is-hard", "is-easy");
+              if (timer.kind === "work") els.ringWrap.classList.add("is-work");
+              if (timer.kind === "hiit-hard") els.ringWrap.classList.add("is-hard");
+              if (timer.kind === "hiit-easy") els.ringWrap.classList.add("is-easy");
+            }
+            if (els.ringLabel) {
+              if (timer.kind === "rest") els.ringLabel.textContent = "Descanso";
+              if (timer.kind === "work") els.ringLabel.textContent = "Plancha";
+              if (timer.kind === "hiit-hard") els.ringLabel.textContent = "Fuerte";
+              if (timer.kind === "hiit-easy") els.ringLabel.textContent = "Suave";
+            }
+            if (els.ringSub) {
+              if (timer.kind === "rest") els.ringSub.textContent = "Siguiente serie";
+              if (timer.kind === "hiit-hard" || timer.kind === "hiit-easy") {
+                els.ringSub.textContent = "Ronda " + (timer.round || 1) + " de " + (timer.total || 20);
+              }
+            }
+          }
           if (left <= 0) onTimerDone();
         }
-      }
+      } catch (err) {}
+    }
+    function loop() {
+      tick();
       raf = requestAnimationFrame(loop);
     }
+    setInterval(tick, 200);
 
     els.dayPills.addEventListener("click", (e) => {
       const btn = e.target.closest("[data-day]");
       if (!btn) return;
       clearTimer();
       state.selectedDay = btn.getAttribute("data-day");
+      state.userPickedDay = true;
       if (!state.days[state.selectedDay]) state.days[state.selectedDay] = emptyDayState(state.selectedDay);
       dietDay = state.selectedDay;
       saveState();
